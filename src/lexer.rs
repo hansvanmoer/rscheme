@@ -4,6 +4,8 @@
 
 use crate::pos::Pos;
 
+use unic_ucd_category::GeneralCategory;
+
 use std::str::Chars;
 use std::iter::Peekable;
 
@@ -36,7 +38,13 @@ pub enum LexerError{
     ///
     /// The supplied hex value is not a proper Unicode code point
     ///
-    InvalidCharHex
+    InvalidCharHex,
+
+    ///
+    /// Invalid character escape
+    ///
+    BadCharEscape
+
 }
 
 ///
@@ -53,7 +61,17 @@ pub enum Token{
     ///
     /// A token representing a literal character
     ///
-    Character(char)
+    Character(char),
+
+    ///
+    /// A token representing a literal string
+    ///
+    String(String),
+
+    ///
+    /// A token representing a symbol
+    ///
+    Symbol(String)
 }
 
 ///
@@ -77,6 +95,29 @@ impl<'a> Lexer<'a>{
 
     fn is_character_hex_delim_char(c: & char) -> bool{
         !c.is_alphanumeric() && c != & '_'
+    }
+
+    fn is_leading_symbol_char(cc: & char) -> bool {
+        let c :char  = *cc;
+        if c.is_ascii_alphabetic() || c == '!' || c == '$' || c == '%' || c == '&' || c == '*' || c == '/' || c == ':' || c == '<' || c == '=' || c == '>' || c == '?' || c == '~' || c == '_' || c == '^' {
+            true
+        }else{
+            match GeneralCategory::of(c) {
+                GeneralCategory::UppercaseLetter | GeneralCategory::LowercaseLetter | GeneralCategory::TitlecaseLetter | GeneralCategory::ModifierLetter | GeneralCategory::OtherLetter | GeneralCategory::NonspacingMark | GeneralCategory::LetterNumber | GeneralCategory::OtherNumber | GeneralCategory::DashPunctuation | GeneralCategory::ConnectorPunctuation | GeneralCategory::OtherPunctuation | GeneralCategory::CurrencySymbol | GeneralCategory::MathSymbol | GeneralCategory::ModifierSymbol | GeneralCategory::OtherSymbol | GeneralCategory::PrivateUse => true,
+                _ => false
+            }
+        }
+    }
+
+    fn is_trailing_symbol_char(c: & char) -> bool{
+        if Lexer::is_leading_symbol_char(c) || c.is_ascii_digit() || c == &'.' || c == &'+' || c == &'-' || c == &'@' {
+            true
+        }else {
+            match GeneralCategory::of(*c) {
+                GeneralCategory::DecimalNumber | GeneralCategory::SpacingMark | GeneralCategory::EnclosingMark => true,
+                _ => false
+            }
+        }
     }
     
     pub fn new(input: &'a str) -> Lexer<'a> {
@@ -182,9 +223,7 @@ impl<'a> Lexer<'a>{
         }
     }
 
-    fn lex_character_hex(& mut self) -> Result<Token, LexerError> {
-        let pos = self.pos();
-        self.skip_non_breaking();
+    fn lex_hex_escape(& mut self) -> Result<char, LexerError> {
         let mut buf = String::new();
         loop {
             match self.peek() {
@@ -194,7 +233,6 @@ impl<'a> Lexer<'a>{
                     }else if Lexer::is_character_hex_delim_char(&c) {
                         break;
                     }else{
-                        self.reset_pos(pos);
                         return Err(LexerError::BadCharHex);
                     }
                 },
@@ -207,15 +245,27 @@ impl<'a> Lexer<'a>{
         match u32::from_str_radix(&buf, 16) {
             Ok(val) => {
                 if val <= 0xD800 || (val >= 0xE000 && val <= 0x10FFF) {
-                    Ok(Token::Character(std::char::from_u32(val).unwrap()))
+                    Ok(std::char::from_u32(val).unwrap())
                 }else{
-                    self.reset_pos(pos);
                     Err(LexerError::InvalidCharHex)
                 }
             },
             Err(_) => {
-                self.reset_pos(pos);
                 Err(LexerError::BadCharHex)
+            }
+        }
+    }
+    
+    fn lex_character_hex(& mut self) -> Result<Token, LexerError> {
+        let pos = self.pos();
+        self.skip_non_breaking();
+        match self.lex_hex_escape() {
+            Ok(c) => {
+                Ok(Token::Character(c))
+            },
+            Err(e) =>{
+                self.reset_pos(pos);
+                Err(e)
             }
         }
     }
@@ -264,13 +314,151 @@ impl<'a> Lexer<'a>{
             None => Err(LexerError::BadEnd)
         }
     }
+
+    fn lex_string(& mut self) -> Result<Token, LexerError> {
+        let pos = self.pos();
+        self.skip_non_breaking();
+        let mut buf = String::new();
+        loop{
+            match self.next() {
+                Some(c) => {
+                    match c {
+                        '\"' => {
+                            return Ok(Token::String(buf));
+                        },
+                        '\\' => {
+                            match self.next() {
+                                Some(e) => {
+                                    buf.push(match e {
+                                        '\\' => '\\',
+                                        'a' => '\u{7}',
+                                        'b' => '\u{8}',
+                                        'f' => '\u{c}',
+                                        'n' => '\n',
+                                        'r' => '\r',
+                                        't' => '\t',
+                                        'v' => '\u{B}',
+                                        'x' => {
+                                            match self.lex_hex_escape() {
+                                                Ok(h) => {
+                                                    h
+                                                },
+                                                Err(e) => {
+                                                    self.reset_pos(pos);
+                                                    return Err(e);
+                                                }
+                                            }
+                                           
+                                        }
+                                        _ => {
+                                            self.reset_pos(pos);
+                                            return Err(LexerError::BadCharEscape);
+                                        }
+                                    });
+                                },
+                                None => {
+                                    return Err(LexerError::BadEnd);
+                                }
+                            }
+                        }
+                        _ => {
+                            buf.push(c);
+                        }
+                    }
+                },
+                None => {
+                    self.reset_pos(pos);
+                    return Err(LexerError::BadEnd);
+                }
+            }
+        }
+    }
+
+    fn lex_symbol(& mut self) -> Result<Option<Token>, LexerError> {
+        match self.peek() {
+            Some(c) => {
+                if Lexer::is_leading_symbol_char(c){
+                     Ok(Some(self.lex_symbol_tested()?))
+                }else{
+                    Ok(None)
+                }
+            },
+            None => {
+                Ok(None)
+            }
+        }
+    }
+    
+    fn lex_symbol_tested(& mut self) -> Result<Token, LexerError> {
+        let pos = self.pos();
+        let mut buf = String::new();
+        loop{
+            match self.peek() {
+                Some(c) => {
+                    if *c == '\\' {
+                        self.skip_non_breaking();
+                        match self.next() {
+                            Some(x) => {
+                                match x {
+                                    'x' => {
+                                        match self.lex_hex_escape() {
+                                            Ok(c) => {
+                                                buf.push(c);
+                                            },
+                                            Err(e) => {
+                                                self.reset_pos(pos);
+                                                return Err(e);
+                                            }
+                                        }
+                                    },
+                                    _ => {
+                                        self.reset_pos(pos);
+                                        return Err(LexerError::BadCharEscape);
+                                    }
+                                }
+                            },
+                            None => {
+                                self.reset_pos(pos);
+                                return Err(LexerError::BadEnd);
+                            }
+                        }
+                    }else if Lexer::is_trailing_symbol_char(c) {
+                        buf.push(self.next().unwrap());
+                    }else{
+                        break;
+                    }
+                },
+                None => {
+                    break;
+                }
+            }
+        }
+        Ok(Token::Symbol(buf))
+    }
     
     pub fn lex(& mut self) -> Result<Option<Token>, LexerError> {
         match self.peek() {
             Some(c) => {
                 match c {
                     '#' => Ok(Some(self.lex_boolean_or_character()?)),
-                    _ => Err(LexerError::BadChar)
+                    '\"' => Ok(Some(self.lex_string()?)),
+                    _ => {
+                        match self.lex_symbol() {
+                            Ok(result) => {
+                                match result {
+                                    Some(token) => {
+                                        Ok(Some(token))
+                                    },
+                                    None => {
+                                        Err(LexerError::BadChar)
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                Err(e)
+                            }
+                        }
+                    }
                 }
             },
             None => Ok(None)
@@ -460,5 +648,75 @@ mod test{
         let mut lexer = Lexer::new("#\\x20FFF");
         assert_eq!(LexerError::InvalidCharHex,lexer.lex().err().unwrap());
         assert_eq!(Pos::new(1,3), lexer.pos());
+    }
+
+    #[test]
+    fn text_simple_string(){
+        let mut lexer = Lexer::new("\"test\"");
+        assert_eq!(Token::String(String::from("test")), lexer.lex().unwrap().unwrap());
+        assert_eq!(Pos::new(1,7), lexer.pos());
+    }
+
+    #[test]
+    fn test_unterm_string(){
+        let mut lexer = Lexer::new("\"test");
+        assert_eq!(LexerError::BadEnd, lexer.lex().err().unwrap());
+        assert_eq!(Pos::new(1,1), lexer.pos());
+    }
+
+    #[test]
+    fn test_string_escapes(){
+        let mut lexer = Lexer::new("\"\\\\ \\a \\b \\f \\n \\r \\t \\v\"");
+        assert_eq!(Token::String(String::from("\\ \u{7} \u{8} \u{c} \n \r \t \u{B}")), lexer.lex().unwrap().unwrap());
+        assert_eq!(Pos::new(1,26), lexer.pos());
+    }
+
+    #[test]
+    fn test_bad_string_escape(){
+        let mut lexer = Lexer::new("\"\\d\"");
+        assert_eq!(LexerError::BadCharEscape, lexer.lex().err().unwrap());
+        assert_eq!(Pos::new(1,1), lexer.pos());
+    }
+
+    #[test]
+    fn test_string_hex_escapes(){
+    let mut lexer = Lexer::new("\"\\x7 \\x8 \\xc \\xB\"");
+        assert_eq!(Token::String(String::from("\u{7} \u{8} \u{c} \u{B}")), lexer.lex().unwrap().unwrap());
+        assert_eq!(Pos::new(1,18), lexer.pos());     
+    }
+
+    #[test]
+    fn test_bad_string_hex_escape(){
+        let mut lexer = Lexer::new("\"\\xJ\"");
+        assert_eq!(LexerError::BadCharHex, lexer.lex().err().unwrap());
+        assert_eq!(Pos::new(1,1), lexer.pos());
+    }
+
+    #[test]
+    fn test_symbol(){
+        let mut lexer = Lexer::new("abc3");
+        assert_eq!(Token::Symbol(String::from("abc3")), lexer.lex().unwrap().unwrap());
+        assert_eq!(Pos::new(1,5), lexer.pos());
+    }
+
+    #[test]
+    fn test_symbol_with_delim(){
+        let mut lexer = Lexer::new("abc3 ");
+        assert_eq!(Token::Symbol(String::from("abc3")), lexer.lex().unwrap().unwrap());
+        assert_eq!(Pos::new(1,5), lexer.pos());
+    }
+
+    #[test]
+    fn test_symbol_with_hex_escape(){
+        let mut lexer = Lexer::new("abc3\\x20");
+        assert_eq!(Token::Symbol(String::from("abc3 ")), lexer.lex().unwrap().unwrap());
+        assert_eq!(Pos::new(1,9), lexer.pos());
+    }
+
+    #[test]
+    fn test_symbol_with_leading_hex_escape(){
+        let mut lexer = Lexer::new("\\x20\\x26");
+        assert_eq!(Token::Symbol(String::from(" &")), lexer.lex().unwrap().unwrap());
+        assert_eq!(Pos::new(1,9), lexer.pos());
     }
 }
