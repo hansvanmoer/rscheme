@@ -3,6 +3,8 @@
 ///
 
 use crate::pos::Pos;
+use crate::number::Number;
+use crate::number::Real;
 
 use unic_ucd_category::GeneralCategory;
 
@@ -43,8 +45,17 @@ pub enum LexerError{
     ///
     /// Invalid character escape
     ///
-    BadCharEscape
+    BadCharEscape,
 
+    ///
+    /// The supplied prefixed datum is neither a boolean nor a character nor a number prefix
+    ///
+    BadDatumPrefix,
+    
+    ///
+    /// Bad number
+    ///
+    BadNumber
 }
 
 ///
@@ -71,7 +82,12 @@ pub enum Token{
     ///
     /// A token representing a symbol
     ///
-    Symbol(String)
+    Symbol(String),
+
+    ///
+    /// A token representing a number
+    ///
+    Number(Number)
 }
 
 ///
@@ -119,6 +135,11 @@ impl<'a> Lexer<'a>{
             }
         }
     }
+
+    fn is_leading_number_char(cc: & char) -> bool{
+        let c = *cc;
+        c == '#'
+    }
     
     pub fn new(input: &'a str) -> Lexer<'a> {
         Lexer{input: input.chars().peekable(), line: 1, col: 1}
@@ -131,7 +152,6 @@ impl<'a> Lexer<'a>{
     pub fn col(& self) -> u32{
         self.col
     }
-
     pub fn pos(& self) -> Pos{
         Pos::new(self.line, self.col)
     }
@@ -294,7 +314,7 @@ impl<'a> Lexer<'a>{
         }
     }
 
-    fn lex_boolean_or_character(& mut self) -> Result<Token, LexerError> {
+    fn lex_hash_datum(& mut self) -> Result<Token, LexerError> {
         self.skip_non_breaking();
         match self.peek() {
             Some(& c) => {
@@ -308,7 +328,10 @@ impl<'a> Lexer<'a>{
                         Ok(Token::Boolean(false))
                     },
                     '\\' => self.lex_character(),
-                    _ => Err(LexerError::BadChar)
+                    'i' | 'e' | 'b' | 'o' | 'd' | 'x' => {
+                        self.lex_prefixed_number()
+                    },
+                    _ => Err(LexerError::BadDatumPrefix)
                 }
             },
             None => Err(LexerError::BadEnd)
@@ -435,12 +458,172 @@ impl<'a> Lexer<'a>{
         }
         Ok(Token::Symbol(buf))
     }
+
+
+    fn lex_real_or_imag(& mut self, radix: &u32, exactness: &bool) -> Result<(bool, Real), LexerError> {
+        return Ok((false, Real::new_unit()))
+    }
+
+    fn lex_imag_or_nothing(& mut self, radix: &u32, exactness: &bool) -> Result<Real, LexerError> {
+        return Ok(Real::new_zero())
+    }
+    
+    fn lex_complex(& mut self, radix: u32, exactness: bool) -> Result<Number, LexerError> {
+        match self.lex_real_or_imag(&radix, &exactness) {
+            Ok((true, imag)) => {
+                Ok(Number::new(radix, exactness, Real::new_zero(), imag))
+            },
+            Ok((false, real)) => {
+                Ok(Number::new(radix, exactness, real, self.lex_imag_or_nothing(&radix, &exactness)?))
+            },
+            _ => {
+                Err(LexerError::BadNumber)
+            }
+        }
+    }
+    
+    fn lex_prefixed_number(& mut self) -> Result<Token, LexerError> {
+        let pos = Pos::new(self.line(), self.col() -1);
+        let mut radix = 10;
+        let mut radix_defined = false;
+        let mut exactness = false;
+        let mut exactness_defined = false;
+
+        match self.next() {
+            Some(c) => {
+                match c {
+                    'b' => {
+                        radix = 2;
+                        radix_defined = true;
+                    },
+                    'o' => {
+                        radix = 8;
+                        radix_defined = true;
+                    },
+                    'd' => {
+                        radix = 10;
+                        radix_defined = true;
+                    },
+                    'x' => {
+                        radix = 16;
+                        radix_defined = true;
+                    },
+                    'i' => {
+                        exactness = false;
+                        exactness_defined = true;
+                    },
+                    'e' => {
+                        exactness = true;
+                        exactness_defined = true;
+                    },
+                    _ => {
+                        self.reset_pos(pos);
+                        return Err(LexerError::BadNumber);
+                    }
+                }
+            },
+            None => {
+                self.reset_pos(pos);
+                return Err(LexerError::BadEnd);
+            }
+        }
+        
+        match self.peek() {
+            Some(c) => {
+                if *c == '#' {
+                    self.skip_non_breaking();
+                    match self.next() {
+                        Some(b) => {
+                            match b {
+                                'b' => {
+                                    if radix_defined {
+                                        self.reset_pos(pos);
+                                        return Err(LexerError::BadNumber);
+                                    }else{
+                                        radix = 2;
+                                        radix_defined = true;
+                                    }
+                                },
+                                'o' => {
+                                    if radix_defined {
+                                        self.reset_pos(pos);
+                                        return Err(LexerError::BadNumber);
+                                    }else{
+                                        radix = 8;
+                                        radix_defined = true;
+                                    }
+                                },
+                                'd' => {
+                                    if radix_defined {
+                                        self.reset_pos(pos);
+                                        return Err(LexerError::BadNumber);
+                                    }else{
+                                        radix = 10;
+                                        radix_defined = true;
+                                    }
+                                },
+                                'x' => {
+                                    if radix_defined {
+                                        self.reset_pos(pos);
+                                        return Err(LexerError::BadNumber);
+                                    }else{
+                                        radix = 16;
+                                        radix_defined = true;
+                                    }
+                                },
+                                'i' => {
+                                    if exactness_defined {
+                                        self.reset_pos(pos);
+                                        return Err(LexerError::BadNumber);
+                                    }else{
+                                        exactness = false;
+                                        exactness_defined = true;
+                                    }
+                                },
+                                'e' => {
+                                    if exactness_defined {
+                                        self.reset_pos(pos);
+                                        return Err(LexerError::BadNumber);
+                                    }else{
+                                        exactness = true;
+                                        exactness_defined = true;
+                                    }
+                                },
+                                _ => {
+                                    self.reset_pos(pos);
+                                    return Err(LexerError::BadNumber);
+                                }
+                            }
+                        },
+                        None => {
+                            self.reset_pos(pos);
+                            return Err(LexerError::BadNumber);
+                        }
+                    }
+                }
+            },
+            None => {
+                self.reset_pos(pos);
+                return Err(LexerError::BadEnd);
+            }
+        }        
+
+        match self.lex_complex(radix, exactness) {
+            Ok(number) => {
+                Ok(Token::Number(number))
+            },
+            Err(e) => {
+                self.reset_pos(pos);
+                Err(e)
+            }
+        }
+    }
     
     pub fn lex(& mut self) -> Result<Option<Token>, LexerError> {
         match self.peek() {
             Some(c) => {
                 match c {
-                    '#' => Ok(Some(self.lex_boolean_or_character()?)),
+                    '#' => Ok(Some(self.lex_hash_datum()?)),
                     '\"' => Ok(Some(self.lex_string()?)),
                     _ => {
                         match self.lex_symbol() {
@@ -473,6 +656,8 @@ mod test{
     use super::Lexer;
     use super::LexerError;
     use super::Token;
+
+    use crate::number::Number;
     use crate::pos::Pos;
     
     #[test]
@@ -490,9 +675,9 @@ mod test{
     }
 
     #[test]
-    fn test_bad_boolean() {
+    fn test_bad_prefixed_datum() {
         let mut lexer = Lexer::new("#r");
-        assert_eq!(LexerError::BadChar, lexer.lex().err().unwrap());
+        assert_eq!(LexerError::BadDatumPrefix, lexer.lex().err().unwrap());
         assert_eq!(Pos::new(1,2), lexer.pos());      
     }
     
@@ -718,5 +903,72 @@ mod test{
         let mut lexer = Lexer::new("\\x20\\x26");
         assert_eq!(Token::Symbol(String::from(" &")), lexer.lex().unwrap().unwrap());
         assert_eq!(Pos::new(1,9), lexer.pos());
+    }
+
+    #[test]
+    fn test_double_exactness_number(){
+        let mut lexer = Lexer::new("#e#e");
+        assert_eq!(LexerError::BadNumber, lexer.lex().err().unwrap());
+        assert_eq!(Pos::new(1,1), lexer.pos());
+
+        let mut lexer = Lexer::new("#e#i");
+        assert_eq!(LexerError::BadNumber, lexer.lex().err().unwrap());
+        assert_eq!(Pos::new(1,1), lexer.pos());
+
+        let mut lexer = Lexer::new("#i#e");
+        assert_eq!(LexerError::BadNumber, lexer.lex().err().unwrap());
+        assert_eq!(Pos::new(1,1), lexer.pos());
+
+        let mut lexer = Lexer::new("#i#i");
+        assert_eq!(LexerError::BadNumber, lexer.lex().err().unwrap());
+        assert_eq!(Pos::new(1,1), lexer.pos());
+    }
+    
+    #[test]
+    fn test_prefixed_exact_base2_number(){
+        //let mut lexer = Lexer::new("#b");
+        //assert_eq!(Token::Number(Number::new(2,true)), lexer.lex().unwrap().unwrap());
+
+        let mut lexer = Lexer::new("#e#b");
+        assert_eq!(Token::Number(Number::new_unit(2,true)), lexer.lex().unwrap().unwrap());
+
+        let mut lexer = Lexer::new("#i#b");
+        assert_eq!(Token::Number(Number::new_unit(2,false)), lexer.lex().unwrap().unwrap());
+    }
+
+    #[test]
+    fn test_prefixed_exact_base8_number(){
+        //let mut lexer = Lexer::new("#o");
+        //assert_eq!(Token::Number(Number::new(8,true)), lexer.lex().unwrap().unwrap());
+
+        let mut lexer = Lexer::new("#e#o");
+        assert_eq!(Token::Number(Number::new_unit(8,true)), lexer.lex().unwrap().unwrap());
+
+        let mut lexer = Lexer::new("#i#o");
+        assert_eq!(Token::Number(Number::new_unit(8,false)), lexer.lex().unwrap().unwrap());
+    }
+
+    #[test]
+    fn test_prefixed_exact_base10_number(){
+        //let mut lexer = Lexer::new("#o");
+        //assert_eq!(Token::Number(Number::new(8,true)), lexer.lex().unwrap().unwrap());
+
+        let mut lexer = Lexer::new("#e#d");
+        assert_eq!(Token::Number(Number::new_unit(10,true)), lexer.lex().unwrap().unwrap());
+
+        let mut lexer = Lexer::new("#i#d");
+        assert_eq!(Token::Number(Number::new_unit(10,false)), lexer.lex().unwrap().unwrap());
+    }
+
+    #[test]
+    fn test_prefixed_exact_base16_number(){
+        //let mut lexer = Lexer::new("#o");
+        //assert_eq!(Token::Number(Number::new(8,true)), lexer.lex().unwrap().unwrap());
+
+        let mut lexer = Lexer::new("#e#x");
+        assert_eq!(Token::Number(Number::new_unit(16,true)), lexer.lex().unwrap().unwrap());
+
+        let mut lexer = Lexer::new("#i#x");
+        assert_eq!(Token::Number(Number::new_unit(16,false)), lexer.lex().unwrap().unwrap());
     }
 }

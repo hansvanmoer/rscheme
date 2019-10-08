@@ -1,4 +1,5 @@
 mod lexer;
+mod number;
 mod pos;
 
 use lexer::Lexer;
